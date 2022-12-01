@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 
 mod day_1;
+mod util;
 
 pub fn solve_task(day: u8, task: u8, input: String) -> Result<()> {
     match day {
