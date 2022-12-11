@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 
 mod day_1;
+mod day_10;
 mod day_2;
 mod day_3;
 mod day_4;
@@ -22,6 +23,7 @@ pub fn solve_task(day: u8, task: u8, input: String) -> Result<()> {
         7 => day_7::solve(task, input),
         8 => day_8::solve(task, input),
         9 => day_9::solve(task, input),
+        10 => day_10::solve(task, input),
         _ => Err(anyhow!("Haven't solved any tasks for this day, yet! Are you sure we're this far into December already?"))
     }
 }

@@ -9,11 +9,11 @@ use std::{
     str::FromStr,
 };
 
-pub fn solve(_task: u8, input: String) -> Result<()> {
+pub fn solve(task: u8, input: String) -> Result<()> {
     let parser = MoveParser::init(input).context("failed to instantiate parser")?;
 
     let (mut head_pos, mut tail_pos) = ((0i32, 0i32), (0i32, 0i32));
-    let rope_len = match _task {
+    let rope_len = match task {
         1 => 2,
         2 => 10,
         _ => return Err(anyhow!("task doesn't exist!")),
