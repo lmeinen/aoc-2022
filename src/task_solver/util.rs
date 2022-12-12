@@ -1,3 +1,7 @@
+use log::debug;
+use regex::Regex;
+
+#[derive(Debug)]
 /// A sorted list of constant size
 pub struct SortedList<T: PartialOrd> {
     capacity: usize,
@@ -36,4 +40,18 @@ impl<T: PartialOrd> SortedList<T> {
         }
         acc
     }
+}
+
+pub fn capture_and_parse<T>(
+    re: &Regex,
+    line: &str,
+    group_name: &str,
+    parse_fn: &dyn Fn(&str) -> T,
+) -> T {
+    let re_captures = re.captures(line).expect("regex failed to capture line");
+    let captured_str = re_captures
+        .name(group_name)
+        .expect("regex didn't contain expected named capture group")
+        .as_str();
+    parse_fn(captured_str)
 }
