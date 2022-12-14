@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Ok, Result};
+use anyhow::{anyhow, Context, Ok, Result};
 use log::{debug, info};
 use petgraph::{algo::dijkstra, graph::NodeIndex, Directed, Graph};
 use std::{

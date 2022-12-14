@@ -34,7 +34,6 @@ struct Directory {
 }
 
 impl Directory {
-    // TODO
     fn init_from_input(input: String) -> Result<Self> {
         // open input file
         let in_file = File::open(input).context(format!("Failed to read input"))?;

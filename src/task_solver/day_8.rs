@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use core::panic;
 use log::{debug, info};
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::VecDeque,
     fs::File,
     io::{BufRead, BufReader},
 };
