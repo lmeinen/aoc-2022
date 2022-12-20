@@ -1,121 +1,17 @@
 use anyhow::{bail, Context, Result};
 
 use log::{debug, info};
+use petgraph::{algo::dijkstra, Directed, Graph};
 use regex::Regex;
 use std::{
+    cmp,
     collections::HashMap,
     fs::File,
+    hash::Hash,
     io::{BufRead, BufReader},
 };
 
 use super::util;
-
-pub fn solve(_task: u8, input: String) -> Result<()> {
-    let (tunnel_system, mut valve_states) = init(input).context("failed to instantiate parser")?;
-
-    debug!("parsed tunnel system {:#?}", tunnel_system);
-
-    // at each valve, we either open it or move on --> two states CHILLING and OPENED
-    // a state consists of a list of open valves, and the sum of released pressure up to that point
-    // initial state is {[], 0} at AA, None at all others
-    // for a valve, compute the next CHILLING state by looking at CHILLING and OPENED of connect valves
-    //      --> take the list of valves with the largest sum of released pressure
-    // for a valve, compute the next OPENED state by looking at its CHILLING state
-
-    let total_time = 30;
-
-    for t in 0..total_time {
-        let mut next_state = HashMap::new();
-        for (id, valve) in tunnel_system.iter() {
-            if let Some(curr_state) = valve_states.get(id) {
-                let mut curr_best = curr_state.clone();
-
-                // compute state for staying at / opening current valve
-                if let Some((steps, open_valves, s)) = &mut curr_best.as_mut() {
-                    *s += flow_rate_sum(open_valves, &tunnel_system);
-                    if !open_valves.contains(id) {
-                        steps.push(Operation::Open(id.to_owned()));
-                        open_valves.push(id.to_owned());
-                    } else {
-                        steps.push(Operation::Null);
-                    }
-                }
-
-                // score that state
-                let mut curr_score = get_score(&curr_best, total_time - t, &tunnel_system);
-
-                for (_, other_state) in valve_states
-                    .iter()
-                    .filter(|(id, _)| valve.tunnels.contains(id))
-                {
-                    // compute state for move from other valve
-                    let other_state_next = if let Some((steps, open_valves, s)) = other_state {
-                        let mut steps = steps.to_vec();
-                        steps.push(Operation::Move(id.to_owned()));
-                        Some((
-                            steps,
-                            open_valves.clone(),
-                            s + flow_rate_sum(open_valves, &tunnel_system),
-                        ))
-                    } else {
-                        None
-                    };
-
-                    // score that state
-                    let other_score = get_score(&other_state_next, total_time - t, &tunnel_system);
-
-                    if match (curr_score, other_score) {
-                        (None, Some(_)) => true,
-                        (Some(x), Some(y)) => x < y,
-                        _ => false,
-                    } {
-                        // pick better one
-                        curr_best = other_state_next;
-                        curr_score = other_score;
-                    }
-                }
-                debug!(
-                    "Minute {} - Valve {}: {:?} --> {:?}",
-                    t,
-                    id,
-                    curr_state.as_ref().map(|(_, _, s)| s),
-                    curr_best.as_ref().map(|(_, _, s)| s)
-                );
-                next_state.insert(id.to_owned(), curr_best);
-            } else {
-                bail!("no state for valve {}", id);
-            }
-        }
-        valve_states = next_state;
-    }
-
-    let mut max_state_opt = None;
-    for (_, s) in valve_states {
-        if let Some((_, _, v)) = s {
-            if let Some((_, _, m)) = max_state_opt {
-                if v > m {
-                    max_state_opt = s;
-                }
-            } else {
-                max_state_opt = s;
-            }
-        }
-    }
-
-    let max_state = max_state_opt.unwrap();
-    debug_output(&max_state.0, total_time, &tunnel_system);
-
-    info!("max released pressure: {}", max_state.2);
-
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
-enum Operation {
-    Null,
-    Open(String),
-    Move(String),
-}
 
 #[derive(Debug)]
 struct Valve {
@@ -123,12 +19,156 @@ struct Valve {
     tunnels: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ValvePruned {
+    flow_rate: u32,
+    valve_distances: HashMap<String, u32>, // shortest distances to all valves with non-zero flow rates
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct State {
+    time: u32,
+    curr_valve: String,
+    open_valves: Vec<String>,
+}
+
+impl State {
+    fn open_valve(&self, dist: u32, valve: String, max_time: u32) -> Option<State> {
+        if self.time + dist + 1 < max_time && !self.open_valves.contains(&valve) {
+            let mut open_valves = self.open_valves.clone();
+            open_valves.push(valve.to_owned());
+            Some(State {
+                time: self.time + dist + 1,
+                curr_valve: valve,
+                open_valves,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn current_flow(&self, tunnel_system: &HashMap<String, ValvePruned>) -> u32 {
+        self.open_valves
+            .iter()
+            .fold(0u32, |acc, v| acc + tunnel_system.get(v).unwrap().flow_rate)
+    }
+
+    fn timestep(&self) -> State {
+        State {
+            time: self.time + 1,
+            curr_valve: self.curr_valve.clone(),
+            open_valves: self.open_valves.clone(),
+        }
+    }
+}
+
 type TunnelSystem = HashMap<String, Valve>;
 
-type State = Option<(Vec<Operation>, Vec<String>, u32)>;
-type ValveStates = HashMap<String, State>;
+fn find_max_score(
+    tunnel_system: &HashMap<String, ValvePruned>,
+    state: State,
+    seen_states: &mut HashMap<State, u32>,
+    max_time: u32,
+    with_elephants: bool,
+) -> u32 {
+    debug!("in state: {:?}", state);
+    if let Some(max_score) = seen_states.get(&state) {
+        *max_score
+    } else {
+        let max_score = if state.time == max_time {
+            if with_elephants {
+                find_max_score(
+                    tunnel_system,
+                    State {
+                        time: 0,
+                        curr_valve: "AA".to_owned(),
+                        open_valves: state.open_valves.clone(),
+                    },
+                    seen_states,
+                    max_time,
+                    false,
+                )
+            } else {
+                0u32
+            }
+        } else {
+            let mut max_score = 0u32;
 
-fn init(input: String) -> Result<(TunnelSystem, ValveStates)> {
+            let mut next_states = Vec::new();
+            for (valve_id, dist) in tunnel_system
+                .get(&state.curr_valve)
+                .unwrap()
+                .valve_distances
+                .iter()
+            {
+                if let Some(next_state) = state.open_valve(*dist, valve_id.to_owned(), max_time) {
+                    next_states.push(next_state);
+                }
+            }
+
+            if next_states.is_empty() {
+                // all reachable valves are open
+                max_score = state.current_flow(tunnel_system)
+                    + find_max_score(
+                        tunnel_system,
+                        state.timestep(),
+                        seen_states,
+                        max_time,
+                        with_elephants,
+                    );
+            } else {
+                while let Some(next_state) = next_states.pop() {
+                    let time_passed = next_state.time - state.time;
+                    let score = find_max_score(
+                        tunnel_system,
+                        next_state,
+                        seen_states,
+                        max_time,
+                        with_elephants,
+                    );
+                    max_score = cmp::max(
+                        max_score,
+                        score + time_passed * state.current_flow(tunnel_system),
+                    );
+                }
+            }
+
+            max_score
+        };
+        seen_states.insert(state, max_score);
+        max_score
+    }
+}
+
+pub fn solve(task: u8, input: String) -> Result<()> {
+    let tunnel_system = init(input).context("failed to instantiate parser")?;
+
+    let ts = prune_tunnelsystem(tunnel_system).context("failed to prune tunnel system")?;
+
+    let (max_time, with_elephants) = match task {
+        1 => (30, false),
+        2 => (26, true),
+        _ => bail!("task doesn't exist!"),
+    };
+
+    let max_score = find_max_score(
+        &ts,
+        State {
+            time: 0u32,
+            curr_valve: "AA".to_owned(),
+            open_valves: vec![],
+        },
+        &mut HashMap::new(),
+        max_time,
+        with_elephants,
+    );
+
+    info!("max released pressure: {}", max_score);
+
+    Ok(())
+}
+
+fn init(input: String) -> Result<TunnelSystem> {
     // open input file
     let in_file = File::open(input).context(format!("Failed to read input"))?;
 
@@ -141,7 +181,7 @@ fn init(input: String) -> Result<(TunnelSystem, ValveStates)> {
     let re_sensor = Regex::new(r"Valve (?P<id>[A-Z]{2}) has flow rate=(?P<flow_rate>\d+); tunnel(?:s)? lead(?:s)? to valve(?:s)? (?P<tunnels>([A-Z]{2}(:?, )?)+)").unwrap();
     while in_reader
         .read_line(&mut line)
-        .expect("Failed to read line in input file")
+        .context("Failed to read line in input file")?
         != 0
         && line != "\n"
     {
@@ -156,67 +196,47 @@ fn init(input: String) -> Result<(TunnelSystem, ValveStates)> {
         line.clear();
     }
 
-    let mut valve_states = HashMap::new();
-    for id in valve_system.keys() {
-        valve_states.insert(
-            id.to_owned(),
-            if id == "AA" {
-                Some((vec![], vec![], 0u32))
-            } else {
-                None
-            },
-        );
-    }
-
-    Ok((valve_system, valve_states))
+    Ok(valve_system)
 }
 
-fn flow_rate_sum(s: &Vec<String>, tunnel_system: &TunnelSystem) -> u32 {
-    let mut c = 0u32;
-    for id in s {
-        c += tunnel_system.get(id).unwrap().flow_rate;
-    }
-    c
-}
+fn prune_tunnelsystem(tunnel_system: TunnelSystem) -> Result<HashMap<String, ValvePruned>> {
+    let mut graph = Graph::<String, (), Directed>::new();
 
-fn get_score(s: &State, time_remaining: u32, tunnel_system: &TunnelSystem) -> Option<u32> {
-    if let Some((_, open_valves, curr_sum)) = s {
-        let sum = flow_rate_sum(open_valves, tunnel_system);
-        Some(curr_sum + sum * time_remaining)
-    } else {
-        None
-    }
-}
+    let mut new_tunnel_system = HashMap::new();
 
-fn debug_output(ops: &Vec<Operation>, total_time: u32, tunnel_system: &TunnelSystem) {
-    let mut open_valves = Vec::new();
-    for t in 0..total_time {
-        debug!("== Minute {} ==", t + 1);
-        if open_valves.is_empty() {
-            debug!("No valves are open.");
-        } else if open_valves.len() == 1 {
-            debug!(
-                "Valve {} is open, releasing {} pressure.",
-                open_valves[0],
-                flow_rate_sum(&open_valves, tunnel_system)
-            );
-        } else {
-            let line = open_valves.join(", ");
-            debug!(
-                "Valves {} are open, releasing {} pressure.",
-                line,
-                flow_rate_sum(&open_valves, tunnel_system)
-            );
+    // initialize graph
+    let mut valve_to_index = HashMap::new();
+    for valve_id in tunnel_system.keys() {
+        valve_to_index.insert(valve_id, graph.add_node(valve_id.to_owned()));
+    }
+
+    for (valve_id, valve) in tunnel_system.iter() {
+        let from_id = valve_to_index.get(valve_id).unwrap();
+        for neighbour in valve.tunnels.iter() {
+            let to_id = valve_to_index.get(neighbour).unwrap();
+            graph.add_edge(*from_id, *to_id, ());
         }
-        let op = &ops[t as usize];
-        match op {
-            Operation::Null => {}
-            Operation::Move(id) => debug!("You move to valve {}.", id),
-            Operation::Open(id) => {
-                debug!("You open valve {}.", id);
-                open_valves.push(id.to_owned());
+    }
+
+    for (valve_id, valve) in tunnel_system.iter() {
+        let from_id = valve_to_index.get(valve_id).unwrap();
+        if valve.flow_rate > 0 || valve_id == "AA" {
+            let mut new_valve = ValvePruned {
+                flow_rate: valve.flow_rate,
+                valve_distances: HashMap::new(),
+            };
+            let sp_map = dijkstra(&graph, *from_id, None, |_| 1);
+            for (to_id, len) in sp_map {
+                let valve_to_id = &graph[to_id];
+                if len > 0 && tunnel_system.get(valve_to_id).unwrap().flow_rate > 0 {
+                    new_valve
+                        .valve_distances
+                        .insert(valve_to_id.to_owned(), len);
+                }
             }
+            new_tunnel_system.insert(valve_id.to_owned(), new_valve);
         }
-        debug!("");
     }
+
+    Ok(new_tunnel_system)
 }
