@@ -41,6 +41,20 @@ impl<T: PartialOrd> SortedList<T> {
     }
 }
 
+pub fn try_capture_and_parse<T>(
+    re: &Regex,
+    line: &str,
+    group_name: &str,
+    parse_fn: &dyn Fn(&str) -> T,
+) -> Option<T> {
+    let re_captures = re.captures(line).expect("regex failed to capture line");
+    if let Some(captured_str) = re_captures.name(group_name) {
+        Some(parse_fn(captured_str.as_str()))
+    } else {
+        None
+    }
+}
+
 pub fn capture_and_parse<T>(
     re: &Regex,
     line: &str,
