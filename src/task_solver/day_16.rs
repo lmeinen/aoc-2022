@@ -26,7 +26,7 @@ struct ValvePruned {
     valve_distances: HashMap<String, u32>, // shortest distances to all valves with non-zero flow rates
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct State {
     time: u32,
     curr_valve: String,
@@ -61,6 +61,14 @@ impl State {
             open_valves: self.open_valves.clone(),
         }
     }
+
+    fn init() -> Self {
+        State {
+            time: 0u32,
+            curr_valve: "AA".to_owned(),
+            open_valves: vec![],
+        }
+    }
 }
 
 type TunnelSystem = HashMap<String, Valve>;
@@ -88,11 +96,14 @@ fn complement_valves(
     tunnel_system: &HashMap<String, ValvePruned>,
     valves: &HashSet<String>,
 ) -> HashSet<String> {
-    tunnel_system
+    debug!("complement of set: {:?}", valves);
+    let complement = tunnel_system
         .keys()
         .filter(|&v| !valves.contains(v))
         .cloned()
-        .collect()
+        .collect();
+    debug!("is: {:?}", complement);
+    complement
 }
 
 fn find_max_score(
@@ -103,29 +114,32 @@ fn find_max_score(
     allowed_valves: &HashSet<String>,
     with_elephants: bool,
 ) -> u32 {
-    debug!("in state: {:?}", state);
-    if let Some(max_score) = seen_states.get(&state) {
+    if with_elephants {
+        debug!("considering valve set {:?}", allowed_valves);
+        find_max_score(
+            tunnel_system,
+            State::init(),
+            seen_states,
+            max_time,
+            allowed_valves,
+            false,
+        ) + find_max_score(
+            tunnel_system,
+            State::init(),
+            seen_states,
+            max_time,
+            &complement_valves(tunnel_system, &allowed_valves),
+            false,
+        )
+    } else if let Some(max_score) = seen_states.get(&state) {
         *max_score
     } else {
         let max_score = if state.time == max_time {
-            if with_elephants {
-                find_max_score(
-                    &remove_valves(tunnel_system, &state.open_valves),
-                    State {
-                        time: 0,
-                        curr_valve: "AA".to_owned(),
-                        open_valves: vec![],
-                    },
-                    seen_states,
-                    max_time,
-                    &complement_valves(tunnel_system, &allowed_valves),
-                    false,
-                )
-            } else {
-                0u32
-            }
+            0u32
         } else {
             let mut max_score = 0u32;
+
+            debug!("t {} - got here", state.time);
 
             let mut next_states = Vec::new();
             for (valve_id, dist) in tunnel_system
@@ -192,17 +206,14 @@ pub fn solve(task: u8, input: String) -> Result<()> {
     };
 
     let mut seen_states = HashMap::new();
+    debug!("subsets: {:?}", allowed_valves_sets);
 
     let max_score = allowed_valves_sets
         .iter()
         .map(|subset| {
             find_max_score(
                 &ts,
-                State {
-                    time: 0u32,
-                    curr_valve: "AA".to_owned(),
-                    open_valves: vec![],
-                },
+                State::init(),
                 &mut seen_states,
                 max_time,
                 &subset,
@@ -251,7 +262,7 @@ fn init(input: String) -> Result<TunnelSystem> {
 fn valve_subsets(tunnel_system: &HashMap<String, ValvePruned>) -> Vec<HashSet<String>> {
     let valves = tunnel_system.keys().cloned().collect::<Vec<String>>();
     let num_valves = valves.len();
-    (0..num_valves / 2)
+    (1..num_valves / 2 + 1)
         .flat_map(|l| valves.iter().combinations(l))
         .map(|valve_vec| valve_vec.into_iter().cloned().collect::<HashSet<String>>())
         .collect::<Vec<HashSet<String>>>()

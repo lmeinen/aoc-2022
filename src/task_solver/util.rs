@@ -1,3 +1,5 @@
+use std::ops::Add;
+
 use regex::Regex;
 
 #[derive(Debug)]
@@ -67,4 +69,36 @@ pub fn capture_and_parse<T>(
         .expect("regex didn't contain expected named capture group")
         .as_str();
     parse_fn(captured_str)
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct Point<T> {
+    x: T,
+    y: T,
+}
+
+impl<T> Point<T> {
+    pub fn get_x(&self) -> &T {
+        &self.x
+    }
+
+    pub fn get_y(&self) -> &T {
+        &self.y
+    }
+
+    pub fn of_tuple((x, y): (T, T)) -> Self {
+        Self { x, y }
+    }
+}
+
+// Notice that the implementation uses the associated type `Output`.
+impl<T: Add<Output = T>> Add for Point<T> {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self::Output {
+        Self {
+            x: self.x + other.x,
+            y: self.y + other.y,
+        }
+    }
 }
