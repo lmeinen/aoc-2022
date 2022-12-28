@@ -14,7 +14,7 @@ use super::util::Point;
 
 type Coordinate = Point<i32>;
 
-pub fn solve(task: u8, input: String) -> Result<()> {
+pub fn solve(_task: u8, input: String) -> Result<()> {
     let (mut elf_positions, mut left_top, mut right_bottom) =
         parse_input(input).context("failed to parse input")?;
     let directions: Vec<_> = vec![(-1, 0), (1, 0), (0, -1), (0, 1)]

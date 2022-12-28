@@ -73,25 +73,6 @@ impl State {
 
 type TunnelSystem = HashMap<String, Valve>;
 
-fn remove_valves(
-    tunnel_system: &HashMap<String, ValvePruned>,
-    valves: &Vec<String>,
-) -> HashMap<String, ValvePruned> {
-    let mut smaller_system = tunnel_system.clone();
-    debug!(
-        "removing valves {:?} from system:\n\t{:#?}",
-        valves, tunnel_system
-    );
-    for valve in valves.iter() {
-        smaller_system.remove(valve);
-        smaller_system.iter_mut().for_each(|(_, v)| {
-            v.valve_distances.remove(valve);
-        });
-    }
-    debug!("--> {:#?}", smaller_system);
-    smaller_system
-}
-
 fn complement_valves(
     tunnel_system: &HashMap<String, ValvePruned>,
     valves: &HashSet<String>,
