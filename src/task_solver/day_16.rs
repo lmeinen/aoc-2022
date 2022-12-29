@@ -1,215 +1,88 @@
 use anyhow::{bail, Context, Result};
 
 use itertools::Itertools;
-use log::{debug, info};
-use petgraph::{algo::dijkstra, Directed, Graph};
+use log::info;
 use regex::Regex;
 use std::{
-    cmp,
-    collections::{HashMap, HashSet},
+    cell::RefCell,
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     fs::File,
-    hash::Hash,
     io::{BufRead, BufReader},
+    rc::Rc,
 };
 
 use super::util;
 
+type NodeRef = Rc<RefCell<Node>>;
+type State = (u32, String, BTreeSet<String>);
+
 #[derive(Debug)]
-struct Valve {
+struct Node {
+    id: String,
     flow_rate: u32,
-    tunnels: Vec<String>,
+    paths: Vec<(u32, NodeRef)>,
 }
 
-#[derive(Debug, Clone)]
-struct ValvePruned {
-    flow_rate: u32,
-    valve_distances: HashMap<String, u32>, // shortest distances to all valves with non-zero flow rates
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct State {
-    time: u32,
-    curr_valve: String,
-    open_valves: Vec<String>,
-}
-
-impl State {
-    fn open_valve(&self, dist: u32, valve: String, max_time: u32) -> Option<State> {
-        if self.time + dist + 1 < max_time && !self.open_valves.contains(&valve) {
-            let mut open_valves = self.open_valves.clone();
-            open_valves.push(valve.to_owned());
-            Some(State {
-                time: self.time + dist + 1,
-                curr_valve: valve,
-                open_valves,
-            })
-        } else {
-            None
-        }
-    }
-
-    fn current_flow(&self, tunnel_system: &HashMap<String, ValvePruned>) -> u32 {
-        self.open_valves
-            .iter()
-            .fold(0u32, |acc, v| acc + tunnel_system.get(v).unwrap().flow_rate)
-    }
-
-    fn timestep(&self) -> State {
-        State {
-            time: self.time + 1,
-            curr_valve: self.curr_valve.clone(),
-            open_valves: self.open_valves.clone(),
-        }
-    }
-
-    fn init() -> Self {
-        State {
-            time: 0u32,
-            curr_valve: "AA".to_owned(),
-            open_valves: vec![],
-        }
-    }
-}
-
-type TunnelSystem = HashMap<String, Valve>;
-
-fn complement_valves(
-    tunnel_system: &HashMap<String, ValvePruned>,
-    valves: &HashSet<String>,
-) -> HashSet<String> {
-    debug!("complement of set: {:?}", valves);
-    let complement = tunnel_system
-        .keys()
-        .filter(|&v| !valves.contains(v))
-        .cloned()
-        .collect();
-    debug!("is: {:?}", complement);
-    complement
-}
-
-fn find_max_score(
-    tunnel_system: &HashMap<String, ValvePruned>,
-    state: State,
-    seen_states: &mut HashMap<State, u32>,
-    max_time: u32,
-    allowed_valves: &HashSet<String>,
-    with_elephants: bool,
+fn max_score(
+    node: &NodeRef,
+    t: u32,
+    closed: &mut BTreeSet<String>,
+    visited: &mut HashMap<State, u32>,
 ) -> u32 {
-    if with_elephants {
-        debug!("considering valve set {:?}", allowed_valves);
-        find_max_score(
-            tunnel_system,
-            State::init(),
-            seen_states,
-            max_time,
-            allowed_valves,
-            false,
-        ) + find_max_score(
-            tunnel_system,
-            State::init(),
-            seen_states,
-            max_time,
-            &complement_valves(tunnel_system, &allowed_valves),
-            false,
-        )
-    } else if let Some(max_score) = seen_states.get(&state) {
-        *max_score
-    } else {
-        let max_score = if state.time == max_time {
-            0u32
-        } else {
-            let mut max_score = 0u32;
-
-            debug!("t {} - got here", state.time);
-
-            let mut next_states = Vec::new();
-            for (valve_id, dist) in tunnel_system
-                .get(&state.curr_valve)
-                .unwrap()
-                .valve_distances
-                .iter()
-                .filter(|(k, _)| allowed_valves.contains(*k))
-            {
-                if let Some(next_state) = state.open_valve(*dist, valve_id.to_owned(), max_time) {
-                    next_states.push(next_state);
-                }
-            }
-
-            if next_states.is_empty() {
-                // all reachable valves are open
-                max_score = state.current_flow(tunnel_system)
-                    + find_max_score(
-                        tunnel_system,
-                        state.timestep(),
-                        seen_states,
-                        max_time,
-                        allowed_valves,
-                        with_elephants,
-                    );
-            } else {
-                while let Some(next_state) = next_states.pop() {
-                    let time_passed = next_state.time - state.time;
-                    let score = find_max_score(
-                        tunnel_system,
-                        next_state,
-                        seen_states,
-                        max_time,
-                        allowed_valves,
-                        with_elephants,
-                    );
-                    max_score = cmp::max(
-                        max_score,
-                        score + time_passed * state.current_flow(tunnel_system),
-                    );
-                }
-            }
-
-            max_score
-        };
-        seen_states.insert(state, max_score);
-        max_score
+    let state = (t, node.borrow().id.to_owned(), closed.clone());
+    if visited.contains_key(&state) {
+        return visited[&state];
     }
+
+    let mut score = 0;
+    for (path_len, next) in node.borrow().paths.iter() {
+        let next_id = next.borrow().id.to_owned();
+        if t > *path_len + 1 && closed.remove(&next_id) {
+            let next_score = (t - path_len - 1) * next.borrow().flow_rate
+                + max_score(next, t - path_len - 1, closed, visited);
+            closed.insert(next_id);
+            if next_score > score {
+                score = next_score;
+            }
+        }
+    }
+    visited.insert(state, score.clone());
+    score
 }
 
 pub fn solve(task: u8, input: String) -> Result<()> {
-    let tunnel_system = init(input).context("failed to instantiate parser")?;
-
-    let ts = prune_tunnelsystem(tunnel_system).context("failed to prune tunnel system")?;
-
-    let (max_time, with_elephants, allowed_valves_sets) = match task {
-        1 => (
-            30,
-            false,
-            vec![ts.keys().cloned().collect::<HashSet<String>>()],
-        ),
-        2 => (26, true, valve_subsets(&ts)),
-        _ => bail!("task doesn't exist!"),
+    let (start, mut id_list) = init(input).context("failed to instantiate parser")?;
+    let score = match task {
+        1 => max_score(&start, 30, &mut id_list, &mut HashMap::new()),
+        2 => {
+            let mut visited_states = HashMap::new();
+            let mut visited_sets = HashSet::new();
+            let mut max = 0u32;
+            for mut subset in id_list
+                .iter()
+                .powerset()
+                .map(|subset| subset.into_iter().cloned().collect::<BTreeSet<String>>())
+            {
+                if !visited_sets.contains(&subset) {
+                    let mut complement = id_list.difference(&subset).cloned().collect();
+                    let score = max_score(&start, 26, &mut complement, &mut visited_states)
+                        + max_score(&start, 26, &mut subset, &mut visited_states);
+                    visited_sets.insert(subset);
+                    visited_sets.insert(complement);
+                    if score > max {
+                        max = score;
+                    }
+                }
+            }
+            max
+        }
+        _ => bail!("task doesn't exist"),
     };
-
-    let mut seen_states = HashMap::new();
-    debug!("subsets: {:?}", allowed_valves_sets);
-
-    let max_score = allowed_valves_sets
-        .iter()
-        .map(|subset| {
-            find_max_score(
-                &ts,
-                State::init(),
-                &mut seen_states,
-                max_time,
-                &subset,
-                with_elephants,
-            )
-        })
-        .max()
-        .unwrap();
-
-    info!("max released pressure: {}", max_score);
-
+    info!("max released pressure: {}", score);
     Ok(())
 }
 
-fn init(input: String) -> Result<TunnelSystem> {
+fn init(input: String) -> Result<(NodeRef, BTreeSet<String>)> {
     // open input file
     let in_file = File::open(input).context(format!("Failed to read input"))?;
 
@@ -218,6 +91,7 @@ fn init(input: String) -> Result<TunnelSystem> {
     let mut line = String::new();
 
     let mut valve_system = HashMap::new();
+    let mut connections = HashMap::new();
 
     let re_sensor = Regex::new(r"Valve (?P<id>[A-Z]{2}) has flow rate=(?P<flow_rate>\d+); tunnel(?:s)? lead(?:s)? to valve(?:s)? (?P<tunnels>([A-Z]{2}(:?, )?)+)").unwrap();
     while in_reader
@@ -233,60 +107,56 @@ fn init(input: String) -> Result<TunnelSystem> {
         let tunnels = util::capture_and_parse(&re_sensor, &line, "tunnels", &|s| {
             s.split(", ").map(|s| s.to_owned()).collect::<Vec<String>>()
         });
-        valve_system.insert(id, Valve { flow_rate, tunnels });
+        connections.insert(id.to_owned(), tunnels);
+        if id == "AA" || flow_rate > 0 {
+            valve_system.insert(
+                id.to_owned(),
+                Rc::new(RefCell::new(Node {
+                    id: id.to_owned(),
+                    flow_rate,
+                    paths: vec![],
+                })),
+            );
+        }
         line.clear();
     }
 
-    Ok(valve_system)
+    Ok((
+        connect(&valve_system, &connections),
+        valve_system.keys().cloned().collect(),
+    ))
 }
 
-fn valve_subsets(tunnel_system: &HashMap<String, ValvePruned>) -> Vec<HashSet<String>> {
-    let valves = tunnel_system.keys().cloned().collect::<Vec<String>>();
-    let num_valves = valves.len();
-    (1..num_valves / 2 + 1)
-        .flat_map(|l| valves.iter().combinations(l))
-        .map(|valve_vec| valve_vec.into_iter().cloned().collect::<HashSet<String>>())
-        .collect::<Vec<HashSet<String>>>()
-}
-
-fn prune_tunnelsystem(tunnel_system: TunnelSystem) -> Result<HashMap<String, ValvePruned>> {
-    let mut graph = Graph::<String, (), Directed>::new();
-
-    let mut new_tunnel_system = HashMap::new();
-
-    // initialize graph
-    let mut valve_to_index = HashMap::new();
-    for valve_id in tunnel_system.keys() {
-        valve_to_index.insert(valve_id, graph.add_node(valve_id.to_owned()));
+fn connect(
+    valve_system: &HashMap<String, NodeRef>,
+    connections: &HashMap<String, Vec<String>>,
+) -> NodeRef {
+    for id in valve_system.keys() {
+        connect_id(valve_system, connections, id);
     }
+    Rc::clone(&valve_system["AA"])
+}
 
-    for (valve_id, valve) in tunnel_system.iter() {
-        let from_id = valve_to_index.get(valve_id).unwrap();
-        for neighbour in valve.tunnels.iter() {
-            let to_id = valve_to_index.get(neighbour).unwrap();
-            graph.add_edge(*from_id, *to_id, ());
+fn connect_id(
+    valve_system: &HashMap<String, NodeRef>,
+    connections: &HashMap<String, Vec<String>>,
+    from_id: &str,
+) {
+    let node = &valve_system[from_id];
+    let mut to_visit = VecDeque::new();
+    let mut visited = HashSet::new();
+    to_visit.push_back((0, from_id));
+    while let Some((path_len, to_id)) = to_visit.pop_front() {
+        visited.insert(to_id);
+        if to_id != from_id && valve_system.contains_key(to_id) {
+            node.borrow_mut()
+                .paths
+                .push((path_len, Rc::clone(&valve_system[to_id])));
         }
-    }
-
-    for (valve_id, valve) in tunnel_system.iter() {
-        let from_id = valve_to_index.get(valve_id).unwrap();
-        if valve.flow_rate > 0 || valve_id == "AA" {
-            let mut new_valve = ValvePruned {
-                flow_rate: valve.flow_rate,
-                valve_distances: HashMap::new(),
-            };
-            let sp_map = dijkstra(&graph, *from_id, None, |_| 1);
-            for (to_id, len) in sp_map {
-                let valve_to_id = &graph[to_id];
-                if len > 0 && tunnel_system.get(valve_to_id).unwrap().flow_rate > 0 {
-                    new_valve
-                        .valve_distances
-                        .insert(valve_to_id.to_owned(), len);
-                }
+        for id in connections[to_id].iter() {
+            if !visited.contains(id as &str) {
+                to_visit.push_back((path_len + 1, id));
             }
-            new_tunnel_system.insert(valve_id.to_owned(), new_valve);
         }
     }
-
-    Ok(new_tunnel_system)
 }

@@ -209,3 +209,8 @@ fn wrap_grid(grid: &Grid, mut x: i32, mut y: i32, d: &(i32, i32)) -> NodeRef {
     };
     get_node(grid, n_x, n_y)
 }
+
+fn _wrap_cube(grid: &Grid, mut x: i32, mut y: i32, d: &(i32, i32)) -> NodeRef {
+    // idea: based on d name desired target face, walk along edges until desired face found (e.g. with recursive function on faces, returning the corresponding neighbour as an option)
+    None
+}
