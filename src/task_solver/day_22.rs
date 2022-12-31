@@ -1,14 +1,17 @@
 use anyhow::{bail, Context, Result};
 
 use log::{debug, info};
+use num::integer::gcd;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
+use std::vec;
 use std::{cell::RefCell, collections::VecDeque, fs::File, rc::Rc};
 
 type NodeRef = Option<Rc<RefCell<Node>>>;
 type Grid = Vec<Vec<NodeRef>>;
 
+#[derive(PartialEq)]
 struct Node {
     coord: (usize, usize),
     neighbours: Vec<NodeRef>,
@@ -17,13 +20,13 @@ struct Node {
 impl Node {
     fn get_neighbour(&self, i: u8) -> Option<(Rc<RefCell<Node>>, u8)> {
         self.neighbours[i as usize].as_ref().map(|r| {
-            let out_face = r
+            let out_face = (**r)
                 .borrow()
                 .neighbours
                 .iter()
                 .enumerate()
                 .find_map(|(in_face, n)| {
-                    if n.is_some() && n.as_ref().unwrap().borrow().coord == self.coord {
+                    if n.is_some() && (**(n.as_ref().unwrap())).borrow().coord == self.coord {
                         Some((in_face + 2) % 4)
                     } else {
                         None
@@ -122,12 +125,15 @@ fn parse_input(input: String, task: u8) -> Result<(Rc<RefCell<Node>>, VecDeque<(
     }
     line.clear();
 
-    let start_node = match task {
-        1 => connect(grid, &obstacles, &Box::new(wrap_grid)),
-        2 => todo!("not implemented"),
+    let start_node = find_start(&grid).expect("failed to find starting node");
+    match task {
+        1 => connect(grid, &obstacles, wrap_grid),
+        2 => {
+            let wrap = build_cube(&grid, (*start_node).borrow().coord);
+            connect(grid, &obstacles, wrap)
+        }
         _ => bail!("task doesn't exist!"),
     }
-    .expect("failed to find starting node");
 
     while in_reader
         .read_line(&mut line)
@@ -157,27 +163,18 @@ fn parse_input(input: String, task: u8) -> Result<(Rc<RefCell<Node>>, VecDeque<(
     Ok((start_node, path))
 }
 
-fn connect(
-    grid: Grid,
-    obstacles: &HashSet<(usize, usize)>,
-    wrap: &Box<fn(&Grid, i32, i32, &(i32, i32)) -> NodeRef>,
-) -> NodeRef {
-    let mut curr_start = None;
+fn connect<W>(grid: Grid, obstacles: &HashSet<(usize, usize)>, wrap: W)
+where
+    W: Fn(&Grid, i32, i32, usize, &(i32, i32)) -> NodeRef,
+{
     for x in 0..grid.len() {
         let row = &grid[x];
         for y in 0..row.len() {
             if let Some(node) = &row[y] {
-                curr_start = curr_start.or_else(|| {
-                    if !obstacles.contains(&(**node).borrow().coord) {
-                        Some(Rc::clone(node))
-                    } else {
-                        None
-                    }
-                });
                 for (i, d) in vec![(0, 1), (1, 0), (0, -1), (-1, 0)].iter().enumerate() {
                     let neighbour = get_node(&grid, (x as i32) + d.0, (y as i32) + d.1)
                         .unwrap_or_else(|| {
-                            wrap(&grid, x as i32, y as i32, d).expect("wrapping function failed")
+                            wrap(&grid, x as i32, y as i32, i, d).expect("wrapping function failed")
                         });
 
                     if !obstacles.contains(&(*neighbour).borrow().coord) {
@@ -187,7 +184,6 @@ fn connect(
             }
         }
     }
-    curr_start
 }
 
 fn get_node(grid: &Grid, x: i32, y: i32) -> NodeRef {
@@ -198,7 +194,16 @@ fn get_node(grid: &Grid, x: i32, y: i32) -> NodeRef {
     }
 }
 
-fn wrap_grid(grid: &Grid, mut x: i32, mut y: i32, d: &(i32, i32)) -> NodeRef {
+fn find_start(grid: &Grid) -> NodeRef {
+    for i in 0..grid[0].len() {
+        if let Some(n) = &grid[0][i] {
+            return Some(Rc::clone(n));
+        }
+    }
+    None
+}
+
+fn wrap_grid(grid: &Grid, mut x: i32, mut y: i32, _: usize, d: &(i32, i32)) -> NodeRef {
     let (n_x, n_y) = loop {
         if let Some(_) = get_node(grid, x - d.0, y - d.1) {
             x -= d.0;
@@ -210,7 +215,134 @@ fn wrap_grid(grid: &Grid, mut x: i32, mut y: i32, d: &(i32, i32)) -> NodeRef {
     get_node(grid, n_x, n_y)
 }
 
-fn _wrap_cube(grid: &Grid, mut x: i32, mut y: i32, d: &(i32, i32)) -> NodeRef {
-    // idea: based on d name desired target face, walk along edges until desired face found (e.g. with recursive function on faces, returning the corresponding neighbour as an option)
-    None
+fn build_cube(
+    grid: &Grid,
+    (x, y): (usize, usize),
+) -> Box<dyn Fn(&Grid, i32, i32, usize, &(i32, i32)) -> NodeRef> {
+    let (side_len, faces) = walk_edges(grid, x, y);
+    Box::new(move |grid, x, y, d, _| {
+        let offset = (x as usize % side_len, y as usize % side_len);
+        let face = ((x as usize - offset.0), (y as usize - offset.1));
+        // find neighbour
+        let neighbour = faces[&face][d];
+        // find the corresponding direction at neighbour
+        let d_n = faces[&neighbour].iter().position(|f| f == &face).unwrap();
+        // consider which face we're walking towards on the edge, replicate the same direction on neighbour's edge
+        let towards_face = if d == 1 || d == 2 {
+            faces[&face][(d + 3) % 4]
+        } else {
+            faces[&face][(d + 1) % 4]
+        };
+        let walk_clockwise = towards_face == faces[&neighbour][(d_n + 1) % 4];
+        let dest_coord = compute_dest_coord(side_len, neighbour, offset, d, d_n, walk_clockwise);
+        get_node(grid, dest_coord.0 as i32, dest_coord.1 as i32)
+    })
+}
+
+fn compute_dest_coord(
+    side_len: usize,
+    neighbour: (usize, usize),
+    offset: (usize, usize),
+    from_d: usize,
+    to_d: usize,
+    walk_clockwise: bool,
+) -> (usize, usize) {
+    let neighbour_vec = vec![neighbour.0, neighbour.1];
+    let offset = if from_d % 2 == to_d % 2 {
+        vec![offset.0, offset.1]
+    } else {
+        vec![offset.1, offset.0]
+    };
+    let mut dest = vec![0; 2];
+    dest[to_d % 2] = neighbour_vec[to_d % 2]
+        + if (to_d % 3 == 0 && walk_clockwise) || (to_d % 3 != 0 && !walk_clockwise) {
+            offset[to_d % 2]
+        } else {
+            (side_len - 1) - offset[to_d % 2]
+        };
+    dest[(to_d + 1) % 2] = neighbour_vec[(to_d + 1) % 2] + if to_d < 2 { side_len - 1 } else { 0 };
+    (dest[0], dest[1])
+}
+
+fn walk_edges(
+    grid: &Grid,
+    x: usize,
+    y: usize,
+) -> (usize, HashMap<(usize, usize), Vec<(usize, usize)>>) {
+    // 1. find edge length
+    let mut side_len = grid.len();
+    for line in grid.iter() {
+        side_len = gcd(side_len, line.len());
+    }
+
+    // 2. label first face
+    let mut labels = Vec::with_capacity(6);
+    labels.push(vec![1, 2, 3, 4]);
+    labels.push(vec![5, 2, 0, 4]);
+    labels.push(vec![1, 5, 3, 0]);
+    labels.push(vec![0, 2, 5, 4]);
+    labels.push(vec![3, 5, 1, 0]);
+    labels.push(vec![3, 2, 1, 4]);
+
+    // 3. walk along edges - label each discovered face and decide orientation
+    let mut to_visit = VecDeque::with_capacity(6);
+    let mut faces = HashMap::new();
+    to_visit.push_back((0, (x, y)));
+    while let Some((face, coord)) = to_visit.pop_front() {
+        let mut new_faces = Vec::new();
+        let mut orientation = 0;
+        // 3a. check for neighbouring faces
+        for (i, d) in vec![(0, 1), (1, 0), (0, -1), (-1, 0)].iter().enumerate() {
+            if let Some(neighbour) = get_node(
+                &grid,
+                (coord.0 as i32) + d.0 * side_len as i32,
+                (coord.1 as i32) + d.1 * side_len as i32,
+            ) {
+                // 3b. check if those faces have been discovered yet:
+                if let Some(neighbour_face) = faces.get(&(*neighbour).borrow().coord) {
+                    // - if yes, check label to decide on own orientation
+                    orientation = (labels[face]
+                        .iter()
+                        .position(|f| f == neighbour_face)
+                        .expect("these two faces shouldn't be neighbouring!")
+                        as i32
+                        - i as i32)
+                        .rem_euclid(4) as usize;
+                } else {
+                    // - if not, add to list of coordinates to be added to to_visit (wait until all directions visited before deciding which face it is)
+                    new_faces.push((i, (*neighbour).borrow().coord));
+                }
+            }
+        }
+
+        // 3c. iterate list of newly discovered faces and label them according to current orientation, then add to to_visit
+        for (i, neighbour_coord) in new_faces.into_iter() {
+            to_visit.push_back((labels[face][(i + orientation) % 4], neighbour_coord));
+        }
+
+        labels[face].rotate_left(orientation);
+        faces.insert(coord, face);
+    }
+
+    let faces = faces
+        .into_iter()
+        .map(|(coord, face)| (face, coord))
+        .collect::<HashMap<usize, (usize, usize)>>();
+
+    (
+        side_len,
+        labels
+            .into_iter()
+            .enumerate()
+            .map(|(face, neighbours)| {
+                (
+                    faces[&face],
+                    neighbours
+                        .into_iter()
+                        .map(|neighbour| faces[&neighbour])
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
 }
